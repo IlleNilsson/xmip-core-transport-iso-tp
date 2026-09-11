@@ -15,23 +15,32 @@
 //! [`Loopback`](can_bus::Loopback) rather than knowing a wire of its
 //! own. Two directed buses stand for the two CAN identifiers a session uses —
 //! one carries the segmented data one way, the other carries flow control back
-//! — so a [`Sender`] and a [`Receiver`] round-trip in process with no hardware.
-//! UDS and OBD-II ride on this crate; what the reassembled bytes mean is
-//! theirs.
+//! — so a tester and an ECU round-trip in process with no hardware, which is
+//! what [`IsoTpTransport::loopback`] stands up (ADR-0051). UDS and OBD-II ride
+//! on this crate; what the reassembled bytes mean is theirs.
 //!
 //! The origin URI names the identifier the data arrived under:
 //! `isotp://<bus>/0x<id>`.
 
 pub mod frame;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use can_bus::{Bus, Frame};
+use can_bus::{Bus, Frame, Loopback as LoopbackBus};
 use transport::error::{Result, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport};
 
 use crate::frame::{CLASSIC_CEILING, CONSECUTIVE_DATA, ESCAPE_DATA, FIRST_DATA, FlowStatus, Pci};
+
+/// The identifier a tester transmits under, and the one the first ECU answers
+/// from: the physical request and response pair of ISO 15765-4.
+pub const TESTER_ID: u32 = 0x7e0;
+/// See [`TESTER_ID`].
+pub const ECU_ID: u32 = 0x7e8;
 
 /// How a session is paced and how far it will stretch. The default is no
 /// block size, no separation and no escape.
@@ -52,12 +61,14 @@ pub struct Pacing {
 /// `outbound` carries what this end transmits — its segmented frames when it
 /// sends, its flow control when it receives; `inbound` carries what the other
 /// end transmits. The peer is the same with the two buses swapped.
+#[derive(Clone)]
 pub struct IsoTpTransport {
     outbound: Arc<dyn Bus>,
     inbound: Arc<dyn Bus>,
     id: u32,
     pacing: Pacing,
     timeout: Duration,
+    standing: Standing,
 }
 
 impl IsoTpTransport {
@@ -71,6 +82,7 @@ impl IsoTpTransport {
             id,
             pacing: Pacing::default(),
             timeout: Duration::from_secs(1),
+            standing: Standing::default(),
         }
     }
 
@@ -241,6 +253,9 @@ impl IsoTpTransport {
             if Instant::now() >= deadline {
                 return Err(protocol_error("no ISO-TP frame before the deadline"));
             }
+            // An in-process bus answers at once when it is empty; let the
+            // peer's thread have the core rather than spin on it.
+            std::thread::yield_now();
         }
     }
 }
@@ -263,26 +278,175 @@ impl Transport for IsoTpTransport {
     }
 }
 
+/// The two directed buses of one loopback session: the tester transmits on
+/// `to_ecu` and reads `to_tester`, the ECU the other way round.
+#[derive(Clone)]
+struct Session {
+    to_ecu: Arc<dyn Bus>,
+    to_tester: Arc<dyn Bus>,
+}
+
+/// The sessions a loopback has stood up and not yet taken, by address. A
+/// fresh pair of buses per round, so rounds driven at once from several
+/// threads never read each other's frames — the file transport learned the
+/// same the hard way on 2026-09-10.
+type Standing = Arc<Mutex<HashMap<String, Session>>>;
+
+/// Numbers the sessions, so each address names one.
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+
+impl IsoTpTransport {
+    /// Both ends on this machine: a tester whose far end is an ECU, the two
+    /// on a fresh pair of directed loopback buses per round, the loopback
+    /// timeout on both. The buses this instance itself holds carry nothing;
+    /// every round stands up its own.
+    #[must_use]
+    pub fn loopback() -> Self {
+        let idle: Arc<dyn Bus> = Arc::new(LoopbackBus::new());
+        Self::new(Arc::clone(&idle), idle, TESTER_ID).timing_out_after(LOOPBACK_TIMEOUT)
+    }
+
+    /// The tester's end of the session at `address`.
+    fn tester(&self, address: &str) -> Result<Self> {
+        let session = self
+            .standing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(address)
+            .cloned()
+            .ok_or_else(|| protocol_error(format!("{address} is not a session stood up here")))?;
+        Ok(Self::new(session.to_ecu, session.to_tester, TESTER_ID)
+            .paced(self.pacing)
+            .timing_out_after(self.timeout))
+    }
+}
+
+/// An ECU waiting to collect its one message. It owns the session: the
+/// address is forgotten once the message is taken.
+struct Ecu {
+    end: IsoTpTransport,
+    standing: Standing,
+    address: String,
+}
+
+impl FarEnd for Ecu {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        let taken = self.end.collect();
+        self.standing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.address);
+        taken
+    }
+}
+
+impl Loopback for IsoTpTransport {
+    /// [`CLASSIC_CEILING`] unless the escape is allowed: the fact ISO 15765-2
+    /// states about a first frame's twelve-bit length.
+    fn ceiling(&self) -> Option<usize> {
+        Some(self.ceiling())
+    }
+
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let session = Session {
+            to_ecu: Arc::new(LoopbackBus::new()),
+            to_tester: Arc::new(LoopbackBus::new()),
+        };
+        let ecu = Self::new(
+            Arc::clone(&session.to_tester),
+            Arc::clone(&session.to_ecu),
+            ECU_ID,
+        )
+        .paced(self.pacing)
+        .timing_out_after(self.timeout);
+        let address = format!(
+            "isotp://loopback/{}",
+            NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
+        );
+        self.standing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(address.clone(), session);
+        Ok(Box::new(Ecu {
+            end: ecu,
+            standing: Arc::clone(&self.standing),
+            address,
+        }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        self.tester(address)?.deliver(payload)
+    }
+
+    /// No socket to poke. A flow-control frame is what no session opens
+    /// with, so an ECU whose tester was refused reads it and is judged now
+    /// rather than at its deadline.
+    fn unblock(&self, address: &str) {
+        if let Ok(tester) = self.tester(address) {
+            drop(tester.transmit_flow(FlowStatus::Continue));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use can_bus::Loopback;
 
-    /// A tester and an ECU sharing two directed buses, the ECU on a thread so
-    /// flow control flows while the tester sends.
+    /// A tester and an ECU on two directed buses, the ECU on a thread so flow
+    /// control flows while the tester sends: the loopback's own round.
     fn round_trip(payload: &[u8], pacing: Pacing) -> Vec<u8> {
-        let to_ecu: Arc<dyn Bus> = Arc::new(Loopback::new());
-        let to_tester: Arc<dyn Bus> = Arc::new(Loopback::new());
-        let tester = IsoTpTransport::new(Arc::clone(&to_ecu), Arc::clone(&to_tester), 0x7e0)
+        IsoTpTransport::loopback()
             .paced(pacing)
-            .timing_out_after(Duration::from_secs(2));
-        let ecu = IsoTpTransport::new(Arc::clone(&to_tester), Arc::clone(&to_ecu), 0x7e8)
-            .paced(pacing)
-            .timing_out_after(Duration::from_secs(2));
-        let sent = payload.to_owned();
-        let collector = std::thread::spawn(move || ecu.collect());
-        tester.deliver(&sent).expect("delivering");
-        collector.join().expect("thread").expect("collecting").bytes
+            .round(payload)
+            .expect("the round")
+            .bytes
+    }
+
+    /// `len` bytes that a truncation, a reorder or a duplicate would change.
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|at| u8::try_from((at * 31 + at / 251) % 256).unwrap_or(0))
+            .collect()
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edge_payloads_whole_and_refuses_over_the_brim() {
+        let loopback = IsoTpTransport::loopback();
+        let edges: [(&str, Vec<u8>); 7] = [
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+            ("the brim", patterned(CLASSIC_CEILING)),
+        ];
+        for (name, bytes) in edges {
+            let arrived = loopback
+                .round(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(arrived.bytes, bytes, "{name}");
+            assert_eq!(arrived.origin_uri, "isotp://loopback/0x7e8", "{name}");
+        }
+        assert_eq!(Loopback::ceiling(&loopback), Some(CLASSIC_CEILING));
+        assert!(loopback.refuses(b"x").is_none());
+        let started = Instant::now();
+        let error = loopback
+            .round(&patterned(CLASSIC_CEILING + 1))
+            .expect_err("one over the brim");
+        assert!(error.message.starts_with("send failed:"), "{error}");
+        assert!(
+            started.elapsed() < LOOPBACK_TIMEOUT,
+            "a refused send is judged, never waited on"
+        );
+        assert!(
+            loopback.standing.lock().expect("lock").is_empty(),
+            "a taken session is forgotten"
+        );
     }
 
     #[test]
@@ -327,9 +491,9 @@ mod tests {
 
     #[test]
     fn a_payload_over_the_ceiling_is_refused_without_the_escape() {
-        let bus: Arc<dyn Bus> = Arc::new(Loopback::new());
-        let flow: Arc<dyn Bus> = Arc::new(Loopback::new());
-        let tester = IsoTpTransport::new(Arc::clone(&bus), Arc::clone(&flow), 0x7e0);
+        let bus: Arc<dyn Bus> = Arc::new(LoopbackBus::new());
+        let flow: Arc<dyn Bus> = Arc::new(LoopbackBus::new());
+        let tester = IsoTpTransport::new(Arc::clone(&bus), Arc::clone(&flow), TESTER_ID);
         assert_eq!(tester.ceiling(), CLASSIC_CEILING);
         assert!(tester.deliver(&vec![0u8; 5000]).is_err());
         assert_eq!(tester.name(), "iso-tp");

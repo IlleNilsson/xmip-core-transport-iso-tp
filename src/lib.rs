@@ -395,6 +395,7 @@ impl Loopback for IsoTpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transport::payload::{edge_payloads, patterned};
 
     /// A tester and an ECU on two directed buses, the ECU on a thread so flow
     /// control flows while the tester sends: the loopback's own round.
@@ -406,25 +407,11 @@ mod tests {
             .bytes
     }
 
-    /// `len` bytes that a truncation, a reorder or a duplicate would change.
-    fn patterned(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|at| u8::try_from((at * 31 + at / 251) % 256).unwrap_or(0))
-            .collect()
-    }
-
     #[test]
     fn the_loopback_returns_the_edge_payloads_whole_and_refuses_over_the_brim() {
         let loopback = IsoTpTransport::loopback();
-        let edges: [(&str, Vec<u8>); 7] = [
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-            ("the brim", patterned(CLASSIC_CEILING)),
-        ];
+        let mut edges = edge_payloads();
+        edges.push(("the brim", patterned(CLASSIC_CEILING)));
         for (name, bytes) in edges {
             let arrived = loopback
                 .round(&bytes)

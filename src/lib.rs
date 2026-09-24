@@ -22,16 +22,18 @@
 //! `isotp://<bus>/0x<id>`.
 
 pub mod frame;
-mod loopback;
+pub mod loopback;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use can_bus::{Bus, Frame};
+use transport::ceiling;
 use transport::error::{Result, protocol_error};
 use transport::{Arrived, Directions, Transport};
 
-use crate::loopback::Standing;
+use crate::loopback::Session;
+use transport::standing::Standing;
 
 use crate::frame::{CLASSIC_CEILING, CONSECUTIVE_DATA, ESCAPE_DATA, FIRST_DATA, FlowStatus, Pci};
 
@@ -68,7 +70,7 @@ pub struct IsoTpTransport {
     id: u32,
     pacing: Pacing,
     timeout: Duration,
-    standing: Standing,
+    standing: Standing<Session>,
 }
 
 impl IsoTpTransport {
@@ -119,13 +121,7 @@ impl IsoTpTransport {
     /// A payload over the ceiling, a peer that overflows or never answers, or
     /// a bus that refused a frame.
     pub fn deliver(&self, payload: &[u8]) -> Result<()> {
-        if payload.len() > self.ceiling() {
-            return Err(protocol_error(format!(
-                "{} bytes is over the ISO-TP ceiling of {}",
-                payload.len(),
-                self.ceiling()
-            )));
-        }
+        ceiling::within(payload.len(), self.ceiling(), "one ISO-TP message carries")?;
         if payload.len() <= frame::SINGLE_MAX {
             return self.transmit(&frame::single(payload)?);
         }
@@ -318,10 +314,7 @@ mod tests {
             started.elapsed() < LOOPBACK_TIMEOUT,
             "a refused send is judged, never waited on"
         );
-        assert!(
-            loopback.standing.lock().expect("lock").is_empty(),
-            "a taken session is forgotten"
-        );
+        assert!(loopback.standing.is_empty(), "a taken session is forgotten");
     }
 
     #[test]

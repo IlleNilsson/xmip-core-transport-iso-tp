@@ -32,7 +32,7 @@ use transport::ceiling;
 use transport::error::{Result, protocol_error};
 use transport::{Arrived, Directions, Transport};
 
-use crate::loopback::Session;
+use can_bus::loopback::Session;
 use transport::standing::Standing;
 
 use crate::frame::{CLASSIC_CEILING, CONSECUTIVE_DATA, ESCAPE_DATA, FIRST_DATA, FlowStatus, Pci};

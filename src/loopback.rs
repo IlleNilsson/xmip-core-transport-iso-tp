@@ -4,43 +4,23 @@
 //! lib.rs outgrew the file gate, as the loopbacks of UDS, OBD-II and J1939
 //! already are.
 //!
-//! The session is public because UDS and OBD-II ride on ISO-TP and stand the
-//! same tester and ECU up for their own rounds; the sessions a loopback has
-//! stood up and not yet taken are the capability's
-//! [`transport::standing::Standing`].
+//! The session is CAN's, [`can_bus::loopback::Session`]: its near node is
+//! the tester and its far node the ECU, and UDS and OBD-II, which ride on
+//! ISO-TP, stand the same pair up for their own rounds. It was this crate's
+//! until 2026-09-25, when J1939 was found standing up the same pair under
+//! other names; the sessions a loopback has stood up and not yet taken are
+//! the capability's [`transport::standing::Standing`].
 
 use std::sync::Arc;
 
 use can_bus::Bus;
+use can_bus::loopback::Session;
 use sdk::broadcast::Medium;
 use transport::error::Result;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 
 use crate::frame::FlowStatus;
 use crate::{ECU_ID, IsoTpTransport, TESTER_ID};
-
-/// One loopback session: the tester and the ECU, each a node on one simulated
-/// bus, hearing what the other transmits. Until 2026-09-24 a session was two
-/// directed queues, because the in-process bus returned a node's own frames.
-#[derive(Clone)]
-pub struct Session {
-    /// The tester's node.
-    pub tester: Arc<dyn Bus>,
-    /// The ECU's node.
-    pub ecu: Arc<dyn Bus>,
-}
-
-impl Session {
-    /// A fresh bus with a tester and an ECU on it.
-    #[must_use]
-    pub fn fresh() -> Self {
-        let medium = Medium::new("loopback");
-        Self {
-            tester: Arc::new(medium.node()),
-            ecu: Arc::new(medium.node()),
-        }
-    }
-}
 
 impl IsoTpTransport {
     /// Both ends on this machine: a tester whose far end is an ECU, the two
@@ -57,7 +37,7 @@ impl IsoTpTransport {
     fn tester(&self, address: &str) -> Result<Self> {
         let session = self.standing.session(address)?;
         Ok(
-            Self::new(Arc::clone(&session.tester), session.tester, TESTER_ID)
+            Self::new(Arc::clone(&session.near), session.near, TESTER_ID)
                 .paced(self.pacing)
                 .timing_out_after(self.timeout),
         )
@@ -77,7 +57,7 @@ impl Loopback for IsoTpTransport {
     /// address is forgotten once the message is taken.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let session = Session::fresh();
-        let ecu = Self::new(Arc::clone(&session.ecu), Arc::clone(&session.ecu), ECU_ID)
+        let ecu = Self::new(Arc::clone(&session.far), Arc::clone(&session.far), ECU_ID)
             .paced(self.pacing)
             .timing_out_after(self.timeout);
         let address = self.standing.stand("isotp", session);

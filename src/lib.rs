@@ -28,9 +28,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use can_bus::{Bus, Frame};
+use transport::Configured;
 use transport::ceiling;
 use transport::error::{Result, protocol_error};
 use transport::{Arrived, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
 use can_bus::loopback::Session;
 use transport::standing::Standing;
@@ -256,6 +258,92 @@ impl IsoTpTransport {
     }
 }
 
+impl Configured for IsoTpTransport {
+    /// The address is the CAN interface, `can0`, both directions ride; the
+    /// settings are the identifier and the pacing.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "id",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 0x1fff_ffff,
+                },
+                presence: Presence::Required,
+                meaning: "The CAN identifier this end transmits under, extended above 0x7ff.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "block_size",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 255,
+                },
+                presence: Presence::Optional,
+                meaning: "Frames taken between flow controls; zero or left out means all of them.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "separation",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 127,
+                },
+                presence: Presence::Optional,
+                meaning: "The minimum gap between consecutive frames, in milliseconds.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "escape",
+                kind: Kind::Boolean,
+                presence: Presence::Optional,
+                meaning: "Whether the 32-bit length escape carries a payload past 4095 bytes.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a peer that stops mid-transfer is waited on.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
+        let bus = can_bus::open_bus(address)?;
+        Ok(Self::on(bus, settings))
+    }
+}
+
+impl IsoTpTransport {
+    /// This end on `bus`, both directions on the one node, as the settings
+    /// read say.
+    fn on(bus: Arc<dyn Bus>, settings: &xcore::settings::Read) -> Self {
+        // The declaration holds every integer within its range.
+        let byte = |name| {
+            settings
+                .optional_integer(name)
+                .map(|n| u8::try_from(n).unwrap_or(0))
+        };
+        let id = u32::try_from(settings.integer("id")).unwrap_or(0);
+        let unpaced = Pacing::default();
+        let pacing = Pacing {
+            block_size: byte("block_size").unwrap_or(unpaced.block_size),
+            separation: byte("separation").unwrap_or(unpaced.separation),
+            escape: settings
+                .optional_boolean("escape")
+                .unwrap_or(unpaced.escape),
+        };
+        let transport = Self::new(Arc::clone(&bus), bus, id).paced(pacing);
+        match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        }
+    }
+}
+
 impl Transport for IsoTpTransport {
     fn name(&self) -> &'static str {
         "iso-tp"
@@ -315,6 +403,32 @@ mod tests {
             "a refused send is judged, never waited on"
         );
         assert!(loopback.standing.is_empty(), "a taken session is forgotten");
+    }
+
+    #[test]
+    fn iso_tp_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        let declared = IsoTpTransport::SETTINGS;
+        assert!(declared.problems().is_empty(), "{:?}", declared.problems());
+
+        let given = [
+            ("id".to_string(), Given::Integer(0x7e0)),
+            ("block_size".to_string(), Given::Integer(8)),
+            ("escape".to_string(), Given::Boolean(true)),
+            ("timeout".to_string(), Given::Text("250ms".to_string())),
+        ];
+        let read = declared.read(Applies::Send, &given).expect("read");
+        let tester = IsoTpTransport::on(Arc::new(Medium::new("can0").node()), &read);
+        assert_eq!(tester.id, TESTER_ID);
+        assert_eq!(tester.pacing.block_size, 8);
+        assert_eq!(tester.pacing.separation, 0);
+        assert!(tester.pacing.escape);
+        assert_eq!(tester.timeout, Duration::from_millis(250));
+
+        let Err(refused) = IsoTpTransport::open("can0", Applies::Receive, &given[1..]) else {
+            panic!("id is required");
+        };
+        assert!(refused.message.contains("\"id\""), "{refused}");
     }
 
     #[test]

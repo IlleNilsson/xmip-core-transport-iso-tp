@@ -28,8 +28,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use can_bus::{Bus, Frame};
+use net::ceiling;
 use transport::Configured;
-use transport::ceiling;
 use transport::error::{Result, protocol_error};
 use transport::{Arrived, Directions, Transport};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
@@ -37,7 +37,20 @@ use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 use can_bus::loopback::Session;
 use transport::standing::Standing;
 
+/// The scheme an origin opens with: `isotp://<bus>/0x<id>`.
+const SCHEME: &str = "isotp";
+
+/// The bus an origin this transport wrote names — `can0` of
+/// `isotp://can0/0x7e8` — or `isotp` where it names none: what the
+/// protocols riding on ISO-TP name the bus by in their own origins, read
+/// here where the origin is written rather than by each of them.
+#[must_use]
+pub fn bus_of(origin: &str) -> &str {
+    Target::under(&[SCHEME], origin).map_or(SCHEME, |named| named.authority())
+}
+
 use crate::frame::{CLASSIC_CEILING, CONSECUTIVE_DATA, ESCAPE_DATA, FIRST_DATA, FlowStatus, Pci};
+use net::Target;
 
 /// The identifier a tester transmits under, and the one the first ECU answers
 /// from: the physical request and response pair of ISO 15765-4.
@@ -146,7 +159,7 @@ impl IsoTpTransport {
     /// # Errors
     /// A malformed frame, a sequence out of order, or a peer that stops.
     pub fn collect(&self) -> Result<Arrived> {
-        let origin = format!("isotp://{}/{:#x}", self.inbound.name(), self.id);
+        let origin = format!("{SCHEME}://{}/{:#x}", self.inbound.name(), self.id);
         match self.read_pci()? {
             Pci::Single { data } => Ok(Arrived::new(origin, data)),
             Pci::First { length, data } => Ok(Arrived::new(origin, self.reassemble(length, data)?)),
@@ -390,6 +403,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(arrived.bytes, bytes, "{name}");
             assert_eq!(arrived.origin_uri, "isotp://loopback/0x7e8", "{name}");
+            assert_eq!(bus_of(&arrived.origin_uri), "loopback", "{name}");
         }
         assert_eq!(Loopback::ceiling(&loopback), Some(CLASSIC_CEILING));
         assert!(loopback.refuses(b"x").is_none());

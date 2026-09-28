@@ -19,6 +19,8 @@ sdk = { package = "xmip-core-sdk", git = "https://github.com/IlleNilsson/xmip-co
 # A Technology depends on its parent Capability, never the reverse
 # (repository-model.md).
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
+# The one refusal of a size over a ceiling (`net::ceiling`).
+net = { package = "xmip-core-library-net", git = "https://github.com/IlleNilsson/xmip-core-library-net", branch = "main" }
 # The settings this technology declares (xcore::settings), read through
 # transport::Configured (ADR-0064, amendment 2026-09-26).
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }

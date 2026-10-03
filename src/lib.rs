@@ -18,6 +18,11 @@
 //! stands up (ADR-0051). UDS and OBD-II ride
 //! on this crate; what the reassembled bytes mean is theirs.
 //!
+//! **Acceptance is at-most-once here** ([`AT_MOST_ONCE`]): ISO 15765-2
+//! acknowledges no message it completed — flow control paces the sender
+//! before the data, and nothing answers the last frame. Each message
+//! arrives whole. UDS above answers its requests itself.
+//!
 //! The origin URI names the identifier the data arrived under:
 //! `isotp://<bus>/0x<id>`.
 
@@ -31,8 +36,13 @@ use can_bus::{Bus, Frame};
 use net::ceiling;
 use transport::Configured;
 use transport::error::{Result, protocol_error};
-use transport::{Arrived, Directions, Transport};
+use transport::{Acknowledgement, Arrived, Directions, Taken, Transport};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+
+/// Why an ISO-TP message cannot be acknowledged after the receive cycle.
+pub const AT_MOST_ONCE: &str = "ISO-TP acknowledges no message it completed: flow control \
+                                paces the sender before the data, and the last frame is \
+                                answered by nothing";
 
 use can_bus::loopback::Session;
 use transport::standing::Standing;
@@ -153,16 +163,17 @@ impl IsoTpTransport {
         self.send_consecutive(&payload[opening..])
     }
 
-    /// Read one segmented message off the data bus, pacing the sender with
-    /// flow control.
+    /// Read one segmented message off the data bus, whole, pacing the
+    /// sender with flow control: what the protocols riding on ISO-TP take
+    /// their requests and answers with.
     ///
     /// # Errors
     /// A malformed frame, a sequence out of order, or a peer that stops.
-    pub fn collect(&self) -> Result<Arrived> {
+    pub fn collect(&self) -> Result<Taken> {
         let origin = format!("{SCHEME}://{}/{:#x}", self.inbound.name(), self.id);
         match self.read_pci()? {
-            Pci::Single { data } => Ok(Arrived::new(origin, data)),
-            Pci::First { length, data } => Ok(Arrived::new(origin, self.reassemble(length, data)?)),
+            Pci::Single { data } => Ok(Taken::new(origin, data)),
+            Pci::First { length, data } => Ok(Taken::new(origin, self.reassemble(length, data)?)),
             _ => Err(protocol_error("a session that did not open with data")),
         }
     }
@@ -366,8 +377,19 @@ impl Transport for IsoTpTransport {
         Directions::BOTH
     }
 
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Ordered("one line or bus, answered in the order it speaks")
+    }
+
+    /// One message, whole. Acceptance is at-most-once here: ISO-TP
+    /// acknowledges no message it completed ([`AT_MOST_ONCE`]).
     fn receive(&self) -> Result<Vec<Arrived>> {
-        Ok(vec![self.collect()?])
+        let taken = self.collect()?;
+        Ok(vec![Arrived::whole(
+            taken.origin_uri,
+            taken.bytes,
+            Acknowledgement::at_most_once(AT_MOST_ONCE),
+        )])
     }
 
     fn send(&self, _target: &str, bytes: &[u8]) -> Result<()> {
@@ -443,6 +465,20 @@ mod tests {
             panic!("id is required");
         };
         assert!(refused.message.contains("\"id\""), "{refused}");
+    }
+
+    #[test]
+    fn a_received_message_says_it_is_at_most_once() {
+        let session = can_bus::loopback::Session::fresh();
+        let tester = IsoTpTransport::new(Arc::clone(&session.near), session.near, TESTER_ID);
+        let ecu = IsoTpTransport::new(Arc::clone(&session.far), session.far, ECU_ID);
+        tester.deliver(b"C1").expect("one single frame");
+        let arrived = ecu.receive().expect("received").remove(0);
+        assert!(
+            !arrived.defers(),
+            "nothing acknowledges a completed message"
+        );
+        assert_eq!(arrived.taken().expect("taken").bytes, b"C1");
     }
 
     #[test]

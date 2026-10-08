@@ -16,6 +16,7 @@ use std::sync::Arc;
 use can_bus::Bus;
 use can_bus::loopback::Session;
 use sdk::broadcast::Medium;
+use transport::ArrivalIdentity;
 use transport::error::Result;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 
@@ -45,6 +46,10 @@ impl IsoTpTransport {
 }
 
 impl Loopback for IsoTpTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Named(&[context::property::CAN_IDENTIFIER])
+    }
+
     /// [`CLASSIC_CEILING`] unless the escape is allowed: the fact ISO 15765-2
     /// states about a first frame's twelve-bit length.
     ///

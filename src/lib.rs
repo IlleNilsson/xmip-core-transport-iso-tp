@@ -26,6 +26,7 @@
 //! The origin URI names the identifier the data arrived under:
 //! `isotp://<bus>/0x<id>`.
 
+mod configured;
 pub mod frame;
 pub mod loopback;
 
@@ -33,11 +34,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use can_bus::{Bus, Frame};
+use context::property::CAN_IDENTIFIER;
 use net::ceiling;
-use transport::Configured;
 use transport::error::{Result, protocol_error};
 use transport::{Acknowledgement, Arrived, Directions, Taken, Transport};
-use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
 /// Why an ISO-TP message cannot be acknowledged after the receive cycle.
 pub const AT_MOST_ONCE: &str = "ISO-TP acknowledges no message it completed: flow control \
@@ -171,11 +171,12 @@ impl IsoTpTransport {
     /// A malformed frame, a sequence out of order, or a peer that stops.
     pub fn collect(&self) -> Result<Taken> {
         let origin = format!("{SCHEME}://{}/{:#x}", self.inbound.name(), self.id);
-        match self.read_pci()? {
-            Pci::Single { data } => Ok(Taken::new(origin, data)),
-            Pci::First { length, data } => Ok(Taken::new(origin, self.reassemble(length, data)?)),
-            _ => Err(protocol_error("a session that did not open with data")),
-        }
+        let bytes = match self.read_pci()? {
+            Pci::Single { data } => data,
+            Pci::First { length, data } => self.reassemble(length, data)?,
+            _ => return Err(protocol_error("a session that did not open with data")),
+        };
+        Ok(Taken::new(origin, bytes).observing(CAN_IDENTIFIER, format!("{:#x}", self.id)))
     }
 
     fn send_consecutive(&self, rest: &[u8]) -> Result<()> {
@@ -282,92 +283,6 @@ impl IsoTpTransport {
     }
 }
 
-impl Configured for IsoTpTransport {
-    /// The address is the CAN interface, `can0`, both directions ride; the
-    /// settings are the identifier and the pacing.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "id",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 0x1fff_ffff,
-                },
-                presence: Presence::Required,
-                meaning: "The CAN identifier this end transmits under, extended above 0x7ff.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "block_size",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 255,
-                },
-                presence: Presence::Optional,
-                meaning: "Frames taken between flow controls; zero or left out means all of them.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "separation",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 127,
-                },
-                presence: Presence::Optional,
-                meaning: "The minimum gap between consecutive frames, in milliseconds.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "escape",
-                kind: Kind::Boolean,
-                presence: Presence::Optional,
-                meaning: "Whether the 32-bit length escape carries a payload past 4095 bytes.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-transfer is waited on.",
-                applies: Applies::Both,
-            },
-        ],
-    };
-
-    fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
-        let bus = can_bus::open_bus(address)?;
-        Ok(Self::on(bus, settings))
-    }
-}
-
-impl IsoTpTransport {
-    /// This end on `bus`, both directions on the one node, as the settings
-    /// read say.
-    fn on(bus: Arc<dyn Bus>, settings: &xcore::settings::Read) -> Self {
-        // The declaration holds every integer within its range.
-        let byte = |name| {
-            settings
-                .optional_integer(name)
-                .map(|n| u8::try_from(n).unwrap_or(0))
-        };
-        let id = u32::try_from(settings.integer("id")).unwrap_or(0);
-        let unpaced = Pacing::default();
-        let pacing = Pacing {
-            block_size: byte("block_size").unwrap_or(unpaced.block_size),
-            separation: byte("separation").unwrap_or(unpaced.separation),
-            escape: settings
-                .optional_boolean("escape")
-                .unwrap_or(unpaced.escape),
-        };
-        let transport = Self::new(Arc::clone(&bus), bus, id).paced(pacing);
-        match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        }
-    }
-}
-
 impl Transport for IsoTpTransport {
     fn name(&self) -> &'static str {
         "iso-tp"
@@ -385,11 +300,14 @@ impl Transport for IsoTpTransport {
     /// acknowledges no message it completed ([`AT_MOST_ONCE`]).
     fn receive(&self) -> Result<Vec<Arrived>> {
         let taken = self.collect()?;
-        Ok(vec![Arrived::whole(
-            taken.origin_uri,
-            taken.bytes,
-            Acknowledgement::at_most_once(AT_MOST_ONCE),
-        )])
+        Ok(vec![
+            Arrived::whole(
+                taken.origin_uri,
+                taken.bytes,
+                Acknowledgement::at_most_once(AT_MOST_ONCE),
+            )
+            .observing_all(taken.observed),
+        ])
     }
 
     fn send(&self, _target: &str, bytes: &[u8]) -> Result<()> {
@@ -401,8 +319,10 @@ impl Transport for IsoTpTransport {
 mod tests {
     use super::*;
     use sdk::broadcast::Medium;
+    use transport::Configured;
     use transport::loopback::{LOOPBACK_TIMEOUT, Loopback};
     use transport::payload::{edge_payloads, patterned};
+    use xcore::settings::Applies;
 
     /// A tester and an ECU on one simulated bus, the ECU on a thread so flow
     /// control flows while the tester sends: the loopback's own round.

@@ -296,6 +296,10 @@ impl Transport for IsoTpTransport {
         transport::Arrivals::Ordered("one line or bus, answered in the order it speaks")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("a read of the bus waits for a frame until the timeout")
+    }
+
     /// One message, whole. Acceptance is at-most-once here: ISO-TP
     /// acknowledges no message it completed ([`AT_MOST_ONCE`]).
     fn receive(&self) -> Result<Vec<Arrived>> {

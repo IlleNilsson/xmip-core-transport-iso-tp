@@ -302,7 +302,7 @@ impl Transport for IsoTpTransport {
 
     /// One message, whole. Acceptance is at-most-once here: ISO-TP
     /// acknowledges no message it completed ([`AT_MOST_ONCE`]).
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let taken = self.collect()?;
         Ok(vec![
             Arrived::whole(
@@ -314,7 +314,12 @@ impl Transport for IsoTpTransport {
         ])
     }
 
-    fn send(&self, _target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("one ISO-TP message is segmented from its whole length")
+    }
+
+    fn send_from(&self, _target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         self.deliver(bytes)
     }
 }

@@ -75,7 +75,7 @@ pub struct Pacing {
     /// Frames the receiver takes between flow controls; zero means all of them.
     pub block_size: u8,
     /// The minimum gap the receiver asks the sender to leave, in milliseconds
-    /// (the sub-millisecond encodings of ISO 15765-2 are not modelled).
+    /// (the sub-millisecond encodings of ISO 15765-2 are not modeled).
     pub separation: u8,
     /// Whether the 32-bit length escape is permitted; without it the payload
     /// ceiling is [`CLASSIC_CEILING`].

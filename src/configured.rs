@@ -63,6 +63,9 @@ impl Configured for IsoTpTransport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &[crate::SCHEME];
+
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let bus = can_bus::open_bus(address)?;
         Ok(Self::on(bus, settings))

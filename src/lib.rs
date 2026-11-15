@@ -68,6 +68,10 @@ pub const TESTER_ID: u32 = 0x7e0;
 /// See [`TESTER_ID`].
 pub const ECU_ID: u32 = 0x7e8;
 
+/// How long a peer that stops mid-transfer is waited on unless a Location
+/// says.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// How a session is paced and how far it will stretch. The default is no
 /// block size, no separation and no escape.
 #[derive(Clone, Copy, Debug, Default)]
@@ -108,7 +112,7 @@ impl IsoTpTransport {
             inbound,
             id,
             pacing: Pacing::default(),
-            timeout: Duration::from_secs(1),
+            timeout: DEFAULT_TIMEOUT,
             standing: Standing::default(),
         }
     }
@@ -118,13 +122,6 @@ impl IsoTpTransport {
     #[must_use]
     pub const fn paced(mut self, pacing: Pacing) -> Self {
         self.pacing = pacing;
-        self
-    }
-
-    /// Give up on a peer that stops mid-transfer.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
         self
     }
 
@@ -388,7 +385,19 @@ mod tests {
         assert_eq!(tester.pacing.block_size, 8);
         assert_eq!(tester.pacing.separation, 0);
         assert!(tester.pacing.escape);
-        assert_eq!(tester.timeout, Duration::from_millis(250));
+        // The Location's timeout is what `open` hands the link once it is
+        // built (`transport::Configured`), on a bus this build simulates.
+        #[cfg(not(all(feature = "socketcan", target_os = "linux")))]
+        {
+            let opened = IsoTpTransport::open("can0", Applies::Send, &given).expect("opened");
+            assert_eq!(opened.timeout, Duration::from_millis(250));
+        }
+        // Left out, the Location waits the default it declares.
+        let unsaid = declared.read(Applies::Receive, &given[..1]).expect("read");
+        let timeout = unsaid.optional_duration(transport::configured::TIMEOUT);
+        assert_eq!(timeout, Some(DEFAULT_TIMEOUT));
+        let ecu = IsoTpTransport::on(Arc::new(Medium::new("can0").node()), &unsaid);
+        assert_eq!(ecu.timeout, DEFAULT_TIMEOUT);
 
         let Err(refused) = IsoTpTransport::open("can0", Applies::Receive, &given[1..]) else {
             panic!("id is required");

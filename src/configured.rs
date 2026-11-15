@@ -8,7 +8,7 @@ use transport::Configured;
 use transport::error::Result;
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
-use crate::{IsoTpTransport, Pacing};
+use crate::{DEFAULT_TIMEOUT, IsoTpTransport, Pacing};
 
 impl Configured for IsoTpTransport {
     /// The address is the CAN interface, `can0`, both directions ride; the
@@ -53,18 +53,20 @@ impl Configured for IsoTpTransport {
                 meaning: "Whether the 32-bit length escape carries a payload past 4095 bytes.",
                 applies: Applies::Both,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-transfer is waited on.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                Some(DEFAULT_TIMEOUT),
+                "How long a peer that stops mid-transfer is waited on.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &[crate::SCHEME];
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let bus = can_bus::open_bus(address)?;
@@ -91,10 +93,6 @@ impl IsoTpTransport {
                 .optional_boolean("escape")
                 .unwrap_or(unpaced.escape),
         };
-        let transport = Self::new(Arc::clone(&bus), bus, id).paced(pacing);
-        match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        }
+        Self::new(Arc::clone(&bus), bus, id).paced(pacing)
     }
 }

@@ -17,6 +17,7 @@ use can_bus::Bus;
 use can_bus::loopback::Session;
 use sdk::broadcast::Medium;
 use transport::ArrivalIdentity;
+use transport::Configured;
 use transport::error::Result;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 

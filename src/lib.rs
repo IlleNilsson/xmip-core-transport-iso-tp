@@ -324,7 +324,6 @@ impl Transport for IsoTpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sdk::broadcast::Medium;
     use transport::Configured;
     use transport::loopback::{LOOPBACK_TIMEOUT, Loopback};
     use transport::payload::{edge_payloads, patterned};
@@ -380,23 +379,22 @@ mod tests {
             ("timeout".to_string(), Given::Text("250ms".to_string())),
         ];
         let read = declared.read(Applies::Send, &given).expect("read");
-        let tester = IsoTpTransport::on(Arc::new(Medium::new("can0").node()), &read);
+        let tester = IsoTpTransport::on(can_bus::simulated("can0"), &read);
         assert_eq!(tester.id, TESTER_ID);
         assert_eq!(tester.pacing.block_size, 8);
         assert_eq!(tester.pacing.separation, 0);
         assert!(tester.pacing.escape);
         // The Location's timeout is what `open` hands the link once it is
-        // built (`transport::Configured`), on a bus this build simulates.
-        #[cfg(not(all(feature = "socketcan", target_os = "linux")))]
-        {
-            let opened = IsoTpTransport::open("can0", Applies::Send, &given).expect("opened");
-            assert_eq!(opened.timeout, Duration::from_millis(250));
-        }
+        // built (`Configured::finished`), here on the simulated bus by its own
+        // constructor, so it holds where a build opens the kernel's.
+        let opened =
+            IsoTpTransport::on(can_bus::simulated("can0"), &read).finished(&read, Applies::Send);
+        assert_eq!(opened.timeout, Duration::from_millis(250));
         // Left out, the Location waits the default it declares.
         let unsaid = declared.read(Applies::Receive, &given[..1]).expect("read");
         let timeout = unsaid.optional_duration(transport::configured::TIMEOUT);
         assert_eq!(timeout, Some(DEFAULT_TIMEOUT));
-        let ecu = IsoTpTransport::on(Arc::new(Medium::new("can0").node()), &unsaid);
+        let ecu = IsoTpTransport::on(can_bus::simulated("can0"), &unsaid);
         assert_eq!(ecu.timeout, DEFAULT_TIMEOUT);
 
         let Err(refused) = IsoTpTransport::open("can0", Applies::Receive, &given[1..]) else {
@@ -461,7 +459,7 @@ mod tests {
 
     #[test]
     fn a_payload_over_the_ceiling_is_refused_without_the_escape() {
-        let bus: Arc<dyn Bus> = Arc::new(Medium::new("loopback").node());
+        let bus = can_bus::simulated("loopback");
         let tester = IsoTpTransport::new(Arc::clone(&bus), bus, TESTER_ID);
         assert_eq!(tester.ceiling(), CLASSIC_CEILING);
         assert!(tester.deliver(&vec![0u8; 5000]).is_err());

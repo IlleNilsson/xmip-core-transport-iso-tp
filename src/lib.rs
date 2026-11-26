@@ -25,55 +25,70 @@
 //!
 //! The origin URI names the identifier the data arrived under:
 //! `isotp://<bus>/0x<id>`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 mod configured;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod frame;
+#[cfg(feature = "default")]
 pub mod loopback;
 
+#[cfg(feature = "default")]
 use std::sync::Arc;
+#[cfg(feature = "default")]
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "default")]
 use can_bus::{Bus, Frame};
+#[cfg(feature = "default")]
 use context::property::CAN_IDENTIFIER;
+#[cfg(feature = "declaration")]
+pub use declaration::{DEFAULT_TIMEOUT, ECU_ID, TESTER_ID};
+#[cfg(feature = "default")]
 use net::ceiling;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
+#[cfg(feature = "default")]
 use transport::{Acknowledgement, Arrived, Directions, Taken, Transport};
 
 /// Why an ISO-TP message cannot be acknowledged after the receive cycle.
+#[cfg(feature = "default")]
 pub const AT_MOST_ONCE: &str = "ISO-TP acknowledges no message it completed: flow control \
                                 paces the sender before the data, and the last frame is \
                                 answered by nothing";
 
+#[cfg(feature = "default")]
 use can_bus::loopback::Session;
+#[cfg(feature = "default")]
+use declaration::SCHEME;
+#[cfg(feature = "default")]
 use transport::standing::Standing;
-
-/// The scheme an origin opens with: `isotp://<bus>/0x<id>`.
-const SCHEME: &str = "isotp";
 
 /// The bus an origin this transport wrote names — `can0` of
 /// `isotp://can0/0x7e8` — or `isotp` where it names none: what the
 /// protocols riding on ISO-TP name the bus by in their own origins, read
 /// here where the origin is written rather than by each of them.
+#[cfg(feature = "default")]
 #[must_use]
 pub fn bus_of(origin: &str) -> &str {
     Target::under(&[SCHEME], origin).map_or(SCHEME, |named| named.authority())
 }
 
+#[cfg(feature = "default")]
 use crate::frame::{CLASSIC_CEILING, CONSECUTIVE_DATA, ESCAPE_DATA, FIRST_DATA, FlowStatus, Pci};
+#[cfg(feature = "default")]
 use net::Target;
-
-/// The identifier a tester transmits under, and the one the first ECU answers
-/// from: the physical request and response pair of ISO 15765-4.
-pub const TESTER_ID: u32 = 0x7e0;
-/// See [`TESTER_ID`].
-pub const ECU_ID: u32 = 0x7e8;
-
-/// How long a peer that stops mid-transfer is waited on unless a Location
-/// says.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How a session is paced and how far it will stretch. The default is no
 /// block size, no separation and no escape.
+#[cfg(feature = "default")]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pacing {
     /// Frames the receiver takes between flow controls; zero means all of them.
@@ -92,6 +107,7 @@ pub struct Pacing {
 /// sends, its flow control when it receives; `inbound` carries what the other
 /// end transmits. On one bus the two are the same node; they are kept apart
 /// for a link that carries each direction separately.
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct IsoTpTransport {
     outbound: Arc<dyn Bus>,
@@ -102,6 +118,7 @@ pub struct IsoTpTransport {
     standing: Standing<Session>,
 }
 
+#[cfg(feature = "default")]
 impl IsoTpTransport {
     /// A session that transmits under `id` on `outbound` and reads the peer
     /// on `inbound`.
@@ -280,6 +297,7 @@ impl IsoTpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for IsoTpTransport {
     fn name(&self) -> &'static str {
         "iso-tp"

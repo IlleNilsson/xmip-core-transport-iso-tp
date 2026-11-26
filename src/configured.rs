@@ -1,68 +1,19 @@
 //! How an ISO-TP end is configured: the CAN interface as the address, the
-//! identifier and the pacing as its settings.
+//! identifier and the pacing as its settings, which the declaration holds
+//! (`declaration.rs`).
 
 use std::sync::Arc;
 
 use can_bus::Bus;
 use transport::Configured;
 use transport::error::Result;
-use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+use xcore::settings::Settings;
 
-use crate::{DEFAULT_TIMEOUT, IsoTpTransport, Pacing};
+use crate::{IsoTpTransport, Pacing, declaration};
 
 impl Configured for IsoTpTransport {
-    /// The address is the CAN interface, `can0`, both directions ride; the
-    /// settings are the identifier and the pacing.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "id",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 0x1fff_ffff,
-                },
-                presence: Presence::Required,
-                meaning: "The CAN identifier this end transmits under, extended above 0x7ff.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "block_size",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 255,
-                },
-                presence: Presence::Optional,
-                meaning: "Frames taken between flow controls; zero or left out means all of them.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "separation",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 127,
-                },
-                presence: Presence::Optional,
-                meaning: "The minimum gap between consecutive frames, in milliseconds.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "escape",
-                kind: Kind::Boolean,
-                presence: Presence::Optional,
-                meaning: "Whether the 32-bit length escape carries a payload past 4095 bytes.",
-                applies: Applies::Both,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                Some(DEFAULT_TIMEOUT),
-                "How long a peer that stops mid-transfer is waited on.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &[crate::SCHEME];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
